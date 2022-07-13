@@ -111,6 +111,7 @@ async function main() {
             promises.push(new Promise((rs, rj) => {
               const loadStream = tables[tableName] = bq.table(tableName).createWriteStream({
                 schema,
+                maxBadRecords: Infinity,
                 sourceFormat: 'NEWLINE_DELIMITED_JSON',
                 createDisposition: 'CREATE_IF_NEEDED',
                 writeDisposition: 'WRITE_APPEND',
