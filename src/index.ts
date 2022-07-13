@@ -14,7 +14,6 @@ import { BigQuery, Job, JobMetadata } from '@google-cloud/bigquery';
 
 import preprocess from './util/preprocessing';
 import getTableName from './util/tables';
-import Prog from './util/Prog';
 
 /////////////
 // CONFIGS //
@@ -23,12 +22,13 @@ import Prog from './util/Prog';
 // S3 URI of the data folder
 const s3uri = 's3://ado-migration-bucket/AWSDynamoDB/01652208807592-ac14d3c7/data/';
 const [_bqc] = [{
-  projectId: 'adhd-dw-core-dev',
-  keyFilename: path.join(__dirname, '../gcp_keyfile/edge.json'),
+  projectId: 'adhd-dw-core-prod',
+  keyFilename: path.join(__dirname, '../gcp_keyfile/prod.json'),
 }];
-const dataset = 'adhd_dataset_dynamo_dev';
+const dataset = 'adhd_dataset_dynamo_prod';
 const s3 = new S3Client({});
-const bq = new BigQuery().dataset(dataset);
+const bq = new BigQuery(_bqc).dataset(dataset);
+const notTables = ['rulecollection_state'];
 
 async function main() {
   // extract data from args
@@ -61,9 +61,6 @@ async function main() {
       continue;
     }
 
-    // start progress readout
-    const prog = new Prog();
-
     // start streaming
     await pipeline(
       getObjRes.Body as Readable,  // input object stream
@@ -88,17 +85,20 @@ async function main() {
           // identify record
           const tableName = getTableName(pk, sk);
           if (!tableName) {
-            prog.stop();
             //console.log(`  Omitting unclassified record ${pksk}`);
+            return done();
+          }
+
+          // skip non-choice tables
+          if (notTables.includes(tableName)) {
             return done();
           }
 
           // clean record
           const [cleanedRecord, schema] = preprocess('', record, {
-            keepEmptyStrings: tableName === 'rulecollection_state'
+            keepEmptyStrings: false, //tableName === 'rulecollection_state'
           }) ?? [];
           if (!cleanedRecord || !schema) {
-            prog.stop();
             console.error(`  Couldn't clean record ${pksk}`);
             return done();
           }
@@ -150,18 +150,13 @@ async function main() {
           // write record
           const loadStream = tables[tableName];
           if (loadStream.write(JSON.stringify(row) + '\n')) {
-            prog.inc();
             return done();
           } else {
-            prog.inc();
             loadStream.once('drain', done);
           }
         },
       }),
     );
-
-    // regular progress end
-    prog.stop();
   }
 
   // after all pipelines have been run
