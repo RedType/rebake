@@ -20,15 +20,19 @@ import getTableName from './util/tables';
 /////////////
 
 // S3 URI of the data folder
-const s3uri = 's3://ado-migration-bucket/AWSDynamoDB/01652208807592-ac14d3c7/data/';
+const s3uri = 's3://dynamo-backup-bucket-dw/AWSDynamoDB/01657750284016-2ec55f66/data/';
 const [_bqc] = [{
   projectId: 'adhd-dw-core-prod',
   keyFilename: path.join(__dirname, '../gcp_keyfile/prod.json'),
 }];
 const dataset = 'adhd_dataset_dynamo_prod';
+const notTables: string[] = ['rulecollection_state'];
+const onlyTables: string[] = ['patients', 'assessment_adhd_results'];
+const objectsPerBatch = 3;
+const timestamp = '2022-07-13T22:15:27.000Z';
+
 const s3 = new S3Client({});
-const bq = new BigQuery(_bqc).dataset(dataset);
-const notTables = ['rulecollection_state'];
+const bq = new BigQuery().dataset(dataset);
 
 async function main() {
   // extract data from args
@@ -44,10 +48,11 @@ async function main() {
   console.log(`Retrieved ${keys.length} keys: ${inspect(keys)}`);
 
   // destination streams
-  const tables: Record<string, Writable> = {};
-  const promises: Promise<void>[] = [];
+  let tables: Record<string, Writable> = {};
+  let promises: Promise<void>[] = [];
 
   // process objects
+  let i = 0;
   for (const Key of keys) {
     console.log(`Streaming ${Key}...`);
 
@@ -78,7 +83,7 @@ async function main() {
               deleted: false,
               eventKind: 'INSERT',
               processed: 0,
-              timestamp: getObjRes.LastModified,
+              timestamp: timestamp || getObjRes.LastModified,
             },
           };
 
@@ -90,7 +95,9 @@ async function main() {
           }
 
           // skip non-choice tables
-          if (notTables.includes(tableName)) {
+          if (onlyTables.length > 0 && !onlyTables.includes(tableName)) {
+            return done();
+          } else if (notTables.includes(tableName)) {
             return done();
           }
 
@@ -141,7 +148,11 @@ async function main() {
                 });
 
                 job.on('error', err => {
-                  console.error(`Error on table ${tableName} load job:`, err)
+                  console.error(`Error on table ${tableName} load job`)
+                  if (err.errors?.get(0)) {
+                    const { reason, location } = err.errors?.get(0);
+                    console.error(`  ${reason} @ ${location}`);
+                  }
                   rj(err);
                 });
               });
@@ -158,15 +169,31 @@ async function main() {
         },
       }),
     );
+
+    // after pipeline has been run enough times
+    if ((i++ % objectsPerBatch) === (objectsPerBatch - 1)) {
+      for (const stream of Object.values(tables)) {
+        stream.end();
+      }
+
+      // wait for all load jobs to finish
+      await Promise.allSettled(promises);
+
+      // reset for next chunk
+      tables = {};
+      promises = [];
+    }
   }
 
-  // after all pipelines have been run
-  for (const stream of Object.values(tables)) {
-    stream.end();
-  }
+  // finish up last batch
+  if (promises.length > 0) {
+    for (const stream of Object.values(tables)) {
+      stream.end();
+    }
 
-  // wait for all load jobs to finish
-  await Promise.allSettled(promises);
+    // wait for all load jobs to finish
+    await Promise.allSettled(promises);
+  }
 }
 
 main();
